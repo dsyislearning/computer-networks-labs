@@ -1,3 +1,5 @@
+#ifndef DATALINK_H
+#define DATALINK_H
 
 /* FRAME kind */
 #define FRAME_DATA 1
@@ -21,4 +23,4 @@
     +=========+========+========+
 */
 
-
+#endif
