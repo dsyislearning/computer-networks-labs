@@ -4,51 +4,53 @@
 #include "protocol.h"
 #include "datalink.h"
 
-#define DATA_TIMER 2000
+#define DATA_TIMER 7400
 #define ACK_TIMER 2000
-#define MAX_PKT 256
-#define MAX_SEQ 15
+#define MAX_SEQ 31
 #define NR_BUFS ((MAX_SEQ + 1) / 2)
 
 typedef enum {false, true} boolean;
-typedef unsigned char frame_kind;
-typedef unsigned char seq_nr;
-typedef struct {unsigned char data[MAX_PKT];} packet;
+typedef unsigned char packet[PKT_LEN];
 
 typedef struct {
-    frame_kind kind;
-    seq_nr ack;
-    seq_nr seq;
-    packet info;
+    unsigned char kind;
+    unsigned char ack;
+    unsigned char seq;
+    packet data;
     unsigned int crc;
 } frame;
 
 static boolean no_nak = true;
 static int phl_ready = 1;
-static int len;
 
 static packet out_buf[NR_BUFS];
 static packet in_buf[NR_BUFS];
 static boolean arrived[NR_BUFS];
 
-void inc(seq_nr *seq)
+static unsigned char ack_expected;
+static unsigned char next_frame_to_send;
+static unsigned char frame_expected;
+static unsigned char too_far;
+static unsigned char nbuffered;
+
+void inc(unsigned char *seq)
 {
     *seq = (*seq + 1) % (MAX_SEQ + 1);
 }
 
-boolean between(seq_nr a, seq_nr b, seq_nr c)
+boolean between(unsigned char a, unsigned char b, unsigned char c)
 {
     return ((a <= b) && (b < c) || (c < a) && (a <= b) || (b < c) && (c < a));
 }
 
-void to_physical_layer(unsigned char *frame)
+void to_physical_layer(unsigned char *frame, int len)
 {
     *(unsigned int *)(frame + len) = crc32(frame, len);
     send_frame(frame, len + 4);
     phl_ready = 0;
 }
 
-void put_frame(frame_kind fk, seq_nr frame_nr, seq_nr frame_expected, packet buffer[])
+void put_frame(unsigned char fk, unsigned char frame_nr, unsigned char frame_expected, packet buffer[NR_BUFS])
 {
     frame s;
 
@@ -58,48 +60,44 @@ void put_frame(frame_kind fk, seq_nr frame_nr, seq_nr frame_expected, packet buf
 
     if (fk == FRAME_ACK) {
         dbg_frame("Send ACK %d\n", s.ack);
-        len = 2;
+        to_physical_layer((unsigned char *)&s, 2);
     }
 
     if (fk == FRAME_NAK) {
         dbg_frame("Send NAK %d\n", s.ack);
-        len = 2;
         no_nak = false;
+        to_physical_layer((unsigned char *)&s, 2);
     }
 
     if (fk == FRAME_DATA) {
-        len = 3 + PKT_LEN;
-        s.info = buffer[frame_nr % NR_BUFS];
-        start_timer(frame_nr % NR_BUFS, DATA_TIMER);
-        dbg_frame("Send DATA %d %d, ID %d\n", s.seq, s.ack, *(short *)s.info.data);
+        memcpy(s.data, buffer[frame_nr % NR_BUFS], PKT_LEN);
+        start_timer(frame_nr, DATA_TIMER);
+        dbg_frame("Send DATA %d %d, ID %d | ack_expected=%d, next_frame_to_send=%d\n",
+            s.seq, s.ack, *(short *)s.data, ack_expected, next_frame_to_send);
+        to_physical_layer((unsigned char *)&s, 3 + PKT_LEN);
     }
-
-    to_physical_layer((unsigned char *)&s);
 
     stop_ack_timer();
 }
 
 boolean get_frame(unsigned char *r)
 {
-    len = recv_frame(r, sizeof(*(frame*)r));
-    if (len < 5 || crc32(r, len) != 0) {
+    int len = recv_frame(r, sizeof(*(frame*)r));
+    if (len < 6 || crc32(r, len) != 0) {
         dbg_event("**** Receiver Error, Bad CRC Checksum\n");
         return false;
     }
     return true;
 }
 
+frame r;
+
 int main(int argc, char **argv)
 {
     int event, arg;
-    seq_nr ack_expected;
-    seq_nr next_frame_to_send;
-    seq_nr frame_expected;
-    seq_nr too_far;
-    seq_nr nbuffered;
-    frame r;
+    
 
-    protocol_init(argc, argv); 
+    protocol_init(argc, argv);
     lprintf("Designed by Deng Siyang, build: " __DATE__"  "__TIME__"\n");
 
     ack_expected = 0;
@@ -116,7 +114,7 @@ int main(int argc, char **argv)
 
         switch (event) {
             case NETWORK_LAYER_READY:
-                get_packet((unsigned char *)&out_buf[next_frame_to_send % NR_BUFS]);
+                get_packet(out_buf[next_frame_to_send % NR_BUFS]);
                 put_frame(FRAME_DATA, next_frame_to_send, frame_expected, out_buf);
                 inc(&next_frame_to_send);
                 nbuffered++;
@@ -134,8 +132,9 @@ int main(int argc, char **argv)
                 }
 
                 if (r.kind == FRAME_DATA) {
-                    dbg_frame("Recv DATA %d %d, ID %d\n", r.seq, r.ack, *(short *)r.info.data);
-                    
+                    dbg_frame("Recv DATA %d %d, ID %d | frame_expected=%d, too_far=%d\n",
+                        r.seq, r.ack, *(short *)r.data, frame_expected, too_far);
+
                     if ((r.seq != frame_expected) && no_nak)
                         put_frame(FRAME_NAK, 0, frame_expected, out_buf);
                     else
@@ -143,9 +142,10 @@ int main(int argc, char **argv)
 
                     if (between(frame_expected, r.seq, too_far) && (arrived[r.seq % NR_BUFS] == false)) {
                         arrived[r.seq % NR_BUFS] = true;
-                        in_buf[r.seq % NR_BUFS] = r.info;
+                        memcpy(in_buf[r.seq % NR_BUFS], r.data, PKT_LEN);
                         while (arrived[frame_expected % NR_BUFS] == true) {
-                            put_packet(in_buf[frame_expected % NR_BUFS].data, PKT_LEN);
+                            put_packet(in_buf[frame_expected % NR_BUFS], PKT_LEN);
+                            dbg_frame("Put PACKET %d\n", *(short *)in_buf[frame_expected % NR_BUFS]);
                             no_nak = true;
                             arrived[frame_expected % NR_BUFS] = false;
                             inc(&frame_expected);
@@ -163,7 +163,7 @@ int main(int argc, char **argv)
                 while (between(ack_expected, r.ack, next_frame_to_send)) {
                     dbg_frame("Recv ACK %d\n", r.ack);
                     nbuffered--;
-                    stop_timer(ack_expected % NR_BUFS);
+                    stop_timer(ack_expected);
                     inc(&ack_expected);
                 }
                 break;
@@ -174,7 +174,7 @@ int main(int argc, char **argv)
                 break;
 
             case ACK_TIMEOUT:
-                dbg_event("---- ACK %d timeout\n", arg);
+                dbg_event("---- ACK timeout\n");
                 put_frame(FRAME_ACK, 0, frame_expected, out_buf);
                 break;
         }
