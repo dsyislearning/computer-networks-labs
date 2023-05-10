@@ -90,12 +90,11 @@ boolean get_frame(unsigned char *r)
     return true;
 }
 
-frame r;
+static frame r;
 
 int main(int argc, char **argv)
 {
     int event, arg;
-    
 
     protocol_init(argc, argv);
     lprintf("Designed by Deng Siyang, build: " __DATE__"  "__TIME__"\n");
