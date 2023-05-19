@@ -6,7 +6,7 @@
 
 #define DATA_TIMER 3200
 #define ACK_TIMER 2000
-#define MAX_SEQ 7
+#define MAX_SEQ 31
 #define NR_BUFS ((MAX_SEQ + 1) / 2)
 
 typedef enum {false, true} boolean;
